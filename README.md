@@ -1,36 +1,81 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Base Stats
 
-## Getting Started
+Base Stats is a mobile-friendly Base wallet activity checker built with Next.js.
 
-First, run the development server:
+It uses the free public Blockscout Base API as the primary data provider and returns real wallet activity metrics through `GET /api/stats/[address]`.
+
+The app also includes an unofficial Base Score based on wallet activity. It is not related to any token, reward, airdrop, eligibility system, or official Base ranking.
+
+## Features
+
+- Base wallet activity stats
+- Base Score from `0` to `100`
+- Fun score level
+- Share card PNG download
+- Privacy mode
+- Wallet connect and manual address input
+
+## Tech
+
+- Next.js App Router
+- TypeScript
+- Tailwind CSS
+- Blockscout Base API for free public data
+
+## Data Provider
+
+- Blockscout Base API
+
+## Important Disclaimer
+
+Base Score is unofficial and not related to any token, reward, airdrop, or official Base ranking.
+
+## Local Setup
+
+1. Install dependencies:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2. Start the dev server:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run dev -- --webpack
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+3. Open [http://localhost:3000](http://localhost:3000)
 
-## Learn More
+## Checks
 
-To learn more about Next.js, take a look at the following resources:
+Run lint:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm run lint
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Run a production build:
 
-## Deploy on Vercel
+```bash
+npm run build
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Privacy Notes
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- The main app can display a wallet address for active checking
+- The downloadable share card never shows a full wallet address
+- Share card privacy mode is enabled by default and shows `Private Wallet`
+- If privacy is turned off, the share card shows only a shortened wallet address
+
+## Notes
+
+- `/api/stats/[address]` uses Blockscout as the free public provider for Base wallet activity
+- CDP debug helpers may still exist under `/api/debug`, but CDP is not used in the normal stats flow
+- API debug routes are intentionally grouped under `/api/debug`
+
+## Base Builder Notes
+
+- Base Stats is designed as a small Base App-ready wallet activity checker.
+- It uses the Blockscout Base API for wallet stats.
+- Base Score is unofficial.
+- Future steps: Base Dashboard registration, Builder Codes / attribution research, and Base App testing.
