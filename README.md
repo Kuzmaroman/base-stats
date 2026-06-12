@@ -11,6 +11,7 @@ The app also includes an unofficial Base Score based on wallet activity. It is n
 - Base wallet activity stats
 - Base Score from `0` to `100`
 - Fun score level
+- Daily Check-in on Base
 - Share card PNG download
 - Privacy mode
 - Wallet connect and manual address input
@@ -46,6 +47,16 @@ npm run dev -- --webpack
 
 3. Open [http://localhost:3000](http://localhost:3000)
 
+## Environment Variables
+
+```bash
+NEXT_PUBLIC_CHECKIN_CONTRACT_ADDRESS=TBD
+NEXT_PUBLIC_BASE_BUILDER_CODE=TBD
+```
+
+Daily Check-in is optional and onchain. If the check-in contract address is not configured yet,
+the app keeps working and shows the Daily Check-in section in a disabled configuration-needed state.
+
 ## Checks
 
 Run lint:
@@ -78,4 +89,5 @@ npm run build
 - Base Stats is designed as a small Base App-ready wallet activity checker.
 - It uses the Blockscout Base API for wallet stats.
 - Base Score is unofficial.
+- Daily Check-in is the first optional onchain action for Base Stats.
 - Future steps: Base Dashboard registration, Builder Codes / attribution research, and Base App testing.

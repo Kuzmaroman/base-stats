@@ -4,6 +4,12 @@ import { toPng } from "html-to-image";
 import type { FormEvent, RefObject } from "react";
 import { useEffect, useRef, useState, useTransition } from "react";
 
+import {
+  getCheckInContractAddress,
+  getDailyCheckInStats,
+  submitDailyCheckIn,
+  type DailyCheckInStats,
+} from "../lib/contracts/checkInContract";
 import type { BaseScoreBreakdown, BaseStats } from "../types/baseStats";
 
 type ApiError = {
@@ -29,6 +35,24 @@ export default function Home() {
     "Wallet not detected. You can paste an address manually.",
   );
   const [isConnectingWallet, setIsConnectingWallet] = useState(false);
+  const [connectedAddress, setConnectedAddress] = useState("");
+  const [dailyCheckInStats, setDailyCheckInStats] = useState<DailyCheckInStats | null>(null);
+  const [dailyCheckInMessage, setDailyCheckInMessage] = useState(
+    "Paste a wallet address to view daily check-in status.",
+  );
+  const [dailyCheckInError, setDailyCheckInError] = useState("");
+  const [isLoadingDailyCheckIn, setIsLoadingDailyCheckIn] = useState(false);
+  const [isSubmittingDailyCheckIn, setIsSubmittingDailyCheckIn] = useState(false);
+
+  const checkInContractAddress = getCheckInContractAddress();
+  const checkInReadAddress = connectedAddress || address.trim();
+  const hasValidCheckInReadAddress = isValidWalletAddress(checkInReadAddress);
+  const canCheckInOnchain = Boolean(connectedAddress && isValidWalletAddress(connectedAddress));
+  const isDailyCheckInDisabled =
+    !checkInContractAddress ||
+    !canCheckInOnchain ||
+    isSubmittingDailyCheckIn ||
+    Boolean(dailyCheckInStats?.checkedInToday);
 
   useEffect(() => {
     let isMounted = true;
@@ -52,11 +76,13 @@ export default function Home() {
       const nextAccount = accounts[0];
 
       if (nextAccount) {
+        setConnectedAddress(nextAccount);
         setAddress(nextAccount);
         setWalletStatusMessage("Connected wallet detected.");
         return;
       }
 
+      setConnectedAddress("");
       setWalletStatusMessage("Wallet disconnected. You can paste an address manually.");
     };
 
@@ -68,6 +94,72 @@ export default function Home() {
       window.ethereum?.removeListener?.("accountsChanged", handleAccountsChanged);
     };
   }, []);
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function loadDailyCheckInStats() {
+      if (!checkInContractAddress) {
+        setDailyCheckInStats(null);
+        setDailyCheckInError("");
+        setDailyCheckInMessage("Daily Check-in contract is not deployed yet.");
+        return;
+      }
+
+      if (!checkInReadAddress) {
+        setDailyCheckInStats(null);
+        setDailyCheckInError("");
+        setDailyCheckInMessage("Paste a wallet address to view daily check-in status.");
+        return;
+      }
+
+      if (!hasValidCheckInReadAddress) {
+        setDailyCheckInStats(null);
+        setDailyCheckInError("");
+        setDailyCheckInMessage("Enter a valid wallet address to view daily check-in status.");
+        return;
+      }
+
+      setIsLoadingDailyCheckIn(true);
+      setDailyCheckInError("");
+
+      try {
+        const nextStats = await getDailyCheckInStats(checkInReadAddress);
+
+        if (ignore) {
+          return;
+        }
+
+        setDailyCheckInStats(nextStats);
+        setDailyCheckInMessage(
+          connectedAddress
+            ? "Connected wallet ready for daily check-in."
+            : "Connect your wallet to check in onchain.",
+        );
+      } catch (loadError) {
+        if (ignore) {
+          return;
+        }
+
+        setDailyCheckInStats(null);
+        setDailyCheckInError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Failed to load daily check-in status.",
+        );
+      } finally {
+        if (!ignore) {
+          setIsLoadingDailyCheckIn(false);
+        }
+      }
+    }
+
+    void loadDailyCheckInStats();
+
+    return () => {
+      ignore = true;
+    };
+  }, [checkInContractAddress, checkInReadAddress, connectedAddress, hasValidCheckInReadAddress]);
 
   async function fetchStats(walletAddress: string) {
     setIsLoading(true);
@@ -173,6 +265,7 @@ export default function Home() {
 
       setWalletProviderDetected(true);
       setWalletStatusMessage("Connected wallet detected.");
+      setConnectedAddress(connectedAddress);
       setAddress(connectedAddress);
       await fetchStats(connectedAddress);
     } catch (connectError) {
@@ -188,6 +281,33 @@ export default function Home() {
   }
 
   const isBusy = isLoading || isPending || isConnectingWallet;
+
+  async function handleDailyCheckIn() {
+    if (!canCheckInOnchain) {
+      setDailyCheckInError("Connect your wallet to check in onchain.");
+      return;
+    }
+
+    setIsSubmittingDailyCheckIn(true);
+    setDailyCheckInError("");
+    setDailyCheckInMessage("Waiting for Base transaction confirmation...");
+
+    try {
+      await submitDailyCheckIn();
+      const refreshedStats = await getDailyCheckInStats(connectedAddress);
+      setDailyCheckInStats(refreshedStats);
+      setDailyCheckInMessage("Daily check-in confirmed on Base.");
+    } catch (checkInError) {
+      setDailyCheckInError(
+        checkInError instanceof Error
+          ? checkInError.message
+          : "Daily check-in transaction failed.",
+      );
+      setDailyCheckInMessage("Connect your wallet to check in onchain.");
+    } finally {
+      setIsSubmittingDailyCheckIn(false);
+    }
+  }
 
   return (
     <main className="min-h-screen w-full overflow-x-hidden bg-[radial-gradient(circle_at_top,_rgba(0,82,255,0.18),_transparent_35%),linear-gradient(180deg,#07101f_0%,#050915_55%,#02050c_100%)] text-white">
@@ -254,6 +374,77 @@ export default function Home() {
           {error ? (
             <div className="mt-4 rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">
               {error}
+            </div>
+          ) : null}
+        </section>
+
+        <section className="mb-5 w-full rounded-[28px] border border-white/10 bg-white/5 p-5 backdrop-blur sm:p-6">
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-medium text-slate-200">Daily Check-in</p>
+              <p className="mt-1 text-xs leading-6 text-slate-400">
+                Check in on Base once per day. This is the first optional onchain action
+                for Base Stats.
+              </p>
+            </div>
+            <div className="rounded-2xl border border-white/8 bg-slate-950/45 px-3 py-2 text-xs text-slate-300">
+              {checkInReadAddress && hasValidCheckInReadAddress
+                ? `Viewing ${shortAddress(checkInReadAddress)}`
+                : "No wallet selected"}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <StatCard
+              label="Current Streak"
+              value={isLoadingDailyCheckIn ? "..." : formatOptionalNumber(dailyCheckInStats?.currentStreak)}
+            />
+            <StatCard
+              label="Longest Streak"
+              value={isLoadingDailyCheckIn ? "..." : formatOptionalNumber(dailyCheckInStats?.longestStreak)}
+            />
+            <StatusCard
+              label="Checked In Today"
+              value={
+                isLoadingDailyCheckIn
+                  ? "Loading"
+                  : dailyCheckInStats
+                    ? dailyCheckInStats.checkedInToday
+                      ? "Yes"
+                      : "No"
+                    : "Unavailable"
+              }
+            />
+          </div>
+
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0 text-sm text-slate-300">
+              <p className="leading-6">{dailyCheckInMessage}</p>
+              {!connectedAddress && address.trim() ? (
+                <p className="mt-1 text-xs text-slate-400">
+                  Connect your wallet to check in onchain.
+                </p>
+              ) : null}
+              {process.env.NEXT_PUBLIC_BASE_BUILDER_CODE ? (
+                <p className="mt-1 text-xs text-slate-500">
+                  Builder Code attribution path is prepared for future Base Dashboard setup.
+                </p>
+              ) : null}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleDailyCheckIn}
+              disabled={isDailyCheckInDisabled}
+              className="inline-flex w-full items-center justify-center rounded-2xl bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+            >
+              {isSubmittingDailyCheckIn ? "Checking in..." : "Check in"}
+            </button>
+          </div>
+
+          {dailyCheckInError ? (
+            <div className="mt-4 rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+              {dailyCheckInError}
             </div>
           ) : null}
         </section>
@@ -604,6 +795,15 @@ function StatCard({ label, value }: { label: string; value: string }) {
   );
 }
 
+function StatusCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-3xl border border-white/8 bg-slate-950/55 p-4">
+      <p className="text-xs uppercase tracking-[0.18em] text-slate-500">{label}</p>
+      <p className="mt-3 text-2xl font-semibold tracking-tight text-white">{value}</p>
+    </div>
+  );
+}
+
 function TimelineRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-3xl border border-white/8 bg-slate-950/55 p-4">
@@ -681,6 +881,10 @@ function LoadingState() {
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatOptionalNumber(value?: number): string {
+  return typeof value === "number" ? formatNumber(value) : "—";
 }
 
 function formatDate(value: string): string {

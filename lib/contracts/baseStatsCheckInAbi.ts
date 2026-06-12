@@ -1,0 +1,60 @@
+export const baseStatsCheckInAbi = [
+  {
+    type: "function",
+    name: "checkIn",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "getCurrentStreak",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "getLongestStreak",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "getLastCheckInDay",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "hasCheckedInToday",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    type: "function",
+    name: "getUserStats",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [
+      { name: "lastCheckInDay", type: "uint256" },
+      { name: "currentStreak", type: "uint256" },
+      { name: "longestStreak", type: "uint256" },
+      { name: "checkedInToday", type: "bool" },
+    ],
+  },
+  {
+    type: "event",
+    name: "CheckedIn",
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: "user", type: "address" },
+      { indexed: false, name: "day", type: "uint256" },
+      { indexed: false, name: "currentStreak", type: "uint256" },
+      { indexed: false, name: "longestStreak", type: "uint256" },
+    ],
+  },
+] as const;
