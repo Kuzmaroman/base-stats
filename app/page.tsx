@@ -218,13 +218,14 @@ export default function Home() {
         method: "GET",
         cache: "no-store",
       });
-      const payload = (await response.json()) as BaseStats | ApiError;
+      const responseText = await response.text();
+      const payload = parseStatsResponse(responseText);
 
       if (!response.ok) {
         throw new Error(
           "error" in payload && payload.error?.message
             ? payload.error.message
-            : "Failed to load Base stats.",
+            : "Failed to load stats. Please try again.",
         );
       }
 
@@ -236,7 +237,7 @@ export default function Home() {
       setError(
         fetchError instanceof Error
           ? fetchError.message
-          : "Failed to load Base stats.",
+          : "Failed to load stats. Please try again.",
       );
     } finally {
       setIsLoading(false);
@@ -1011,6 +1012,14 @@ function formatNumber(value: number): string {
 
 function formatOptionalNumber(value?: number): string {
   return typeof value === "number" ? formatNumber(value) : "—";
+}
+
+function parseStatsResponse(responseText: string): BaseStats | ApiError {
+  try {
+    return JSON.parse(responseText) as BaseStats | ApiError;
+  } catch {
+    throw new Error("Failed to load stats. Please try again.");
+  }
 }
 
 function formatDate(value: string): string {

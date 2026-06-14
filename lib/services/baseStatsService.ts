@@ -12,12 +12,13 @@ import type {
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const CACHE_DIR = path.join(process.cwd(), ".cache", "base-stats");
 const ENABLE_FILE_CACHE = process.env.NODE_ENV !== "production";
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 
 type CachedStatsEntry = {
     version: string;
     cachedAt: string;
     stats: BaseStats;
+    method: "txlist" | "v2-fallback" | "cdp";
     pagesFetched: number;
     transactionsProcessed: number;
 };
@@ -77,6 +78,7 @@ export class BaseStatsService {
             version: CACHE_VERSION,
             cachedAt: new Date().toISOString(),
             stats,
+            method: walletActivityResult.method,
             pagesFetched: walletActivityResult.pagesFetched,
             transactionsProcessed: walletActivityResult.transactionsProcessed,
         };
@@ -103,6 +105,7 @@ function toStatsResult(
     return {
         stats: entry.stats,
         cacheSource,
+        method: cacheSource === "fresh" ? entry.method : "cache",
         pagesFetched: entry.pagesFetched,
         transactionsProcessed: entry.transactionsProcessed,
     };

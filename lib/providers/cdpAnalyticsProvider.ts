@@ -59,6 +59,7 @@ export class CdpAnalyticsProvider implements BaseAnalyticsProvider {
 
         return {
             activity,
+            method: "cdp",
             pagesFetched: 0,
             transactionsProcessed: 0,
         };

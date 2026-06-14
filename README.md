@@ -84,6 +84,8 @@ npm run build
 ## Notes
 
 - `/api/stats/[address]` uses Blockscout as the free public provider for Base wallet activity
+- The production stats path uses Blockscout's faster Etherscan-compatible `txlist` endpoint
+- Blockscout `/api/v2` pagination is kept as a capped fallback for resilience
 - CDP debug helpers may still exist under `/api/debug`, but CDP is not used in the normal stats flow
 - API debug routes are intentionally grouped under `/api/debug`
 

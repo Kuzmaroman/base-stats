@@ -62,13 +62,23 @@ export function getCheckInChainConfig(): CheckInChainConfig {
 }
 
 export function getCheckInContractAddress(): Address | null {
-  const configuredAddress = process.env.NEXT_PUBLIC_CHECKIN_CONTRACT_ADDRESS?.trim();
+    const configuredAddress = process.env.NEXT_PUBLIC_CHECKIN_CONTRACT_ADDRESS?.trim();
 
-  if (!configuredAddress || !isAddress(configuredAddress)) {
-    return null;
-  }
+    if (!configuredAddress) {
+        logCheckInConfigIssue(
+            "NEXT_PUBLIC_CHECKIN_CONTRACT_ADDRESS is missing. Daily Check-in stays disabled until a valid address is provided.",
+        );
+        return null;
+    }
 
-  return getAddress(configuredAddress);
+    if (!isAddress(configuredAddress)) {
+        logCheckInConfigIssue(
+            "NEXT_PUBLIC_CHECKIN_CONTRACT_ADDRESS is invalid. Daily Check-in requires a valid 0x contract address.",
+        );
+        return null;
+    }
+
+    return getAddress(configuredAddress);
 }
 
 export function isCheckInContractConfigured(): boolean {
@@ -214,5 +224,11 @@ function isMissingChainError(error: unknown): boolean {
     return false;
   }
 
-  return "code" in error && error.code === 4902;
+    return "code" in error && error.code === 4902;
+}
+
+function logCheckInConfigIssue(message: string): void {
+    if (process.env.NODE_ENV !== "production") {
+        console.warn(`[Base Stats][Check-In] ${message}`);
+    }
 }

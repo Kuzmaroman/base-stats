@@ -1,4 +1,5 @@
 const BLOCKSCOUT_API_BASE_URL = "https://base.blockscout.com/api/v2";
+const BLOCKSCOUT_COMPAT_API_URL = "https://base.blockscout.com/api";
 
 export interface BlockscoutCountersResponse {
     transactions_count?: string;
@@ -39,6 +40,24 @@ export interface BlockscoutTransactionsResponse {
     [key: string]: unknown;
 }
 
+export interface BlockscoutTxListItem {
+    hash?: string | null;
+    timeStamp?: string | null;
+    from?: string | null;
+    to?: string | null;
+    input?: string | null;
+    contractAddress?: string | null;
+    isError?: string | null;
+    txreceipt_status?: string | null;
+    [key: string]: unknown;
+}
+
+export interface BlockscoutTxListResponse {
+    status?: string;
+    message?: string;
+    result?: BlockscoutTxListItem[] | string | null;
+}
+
 export class BlockscoutApiError extends Error {
     constructor(
         message: string,
@@ -72,6 +91,25 @@ export class BlockscoutClient {
         );
     }
 
+    async getAddressTxList(
+        address: string,
+        queryName = "blockscout-address-txlist",
+    ): Promise<BlockscoutTxListResponse> {
+        return this.fetchCompatJson<BlockscoutTxListResponse>(
+            {
+                module: "account",
+                action: "txlist",
+                address,
+                startblock: 0,
+                endblock: 99999999,
+                sort: "asc",
+                page: 1,
+                offset: 10000,
+            },
+            queryName,
+        );
+    }
+
     private async fetchJson<T>(
         path: string,
         query: Record<string, string | number | boolean | null | undefined> | undefined,
@@ -87,6 +125,44 @@ export class BlockscoutClient {
 
                 url.searchParams.set(key, String(value));
             }
+        }
+
+        const response = await this.fetcher(url.toString(), {
+            method: "GET",
+            cache: "no-store",
+        });
+
+        if (!response.ok) {
+            const responseBodyText = await response.text();
+
+            console.error("[Base Stats][Blockscout] API error", {
+                queryName,
+                status: response.status,
+                statusText: response.statusText,
+                body: responseBodyText,
+            });
+
+            throw new BlockscoutApiError(
+                `Blockscout API request failed (${response.status}): ${truncate(responseBodyText)}`,
+                response.status,
+            );
+        }
+
+        return (await response.json()) as T;
+    }
+
+    private async fetchCompatJson<T>(
+        query: Record<string, string | number | boolean | null | undefined>,
+        queryName: string,
+    ): Promise<T> {
+        const url = new URL(BLOCKSCOUT_COMPAT_API_URL);
+
+        for (const [key, value] of Object.entries(query)) {
+            if (value === null || value === undefined) {
+                continue;
+            }
+
+            url.searchParams.set(key, String(value));
         }
 
         const response = await this.fetcher(url.toString(), {

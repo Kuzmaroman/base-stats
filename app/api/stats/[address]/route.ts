@@ -39,6 +39,7 @@ export async function GET(
             address: result.stats.address,
             durationMs: Date.now() - startedAt,
             cacheSource: result.cacheSource,
+            method: result.method,
             pagesFetched: result.pagesFetched,
             transactionsProcessed: result.transactionsProcessed,
         });
@@ -49,8 +50,8 @@ export async function GET(
             return NextResponse.json(
                 {
                     error: {
-                        code: "BLOCKSCOUT_API_ERROR",
-                        message: "Failed to load Base wallet stats from Blockscout.",
+                        code: "STATS_PROVIDER_ERROR",
+                        message: "Failed to load Base wallet stats.",
                     },
                 },
                 { status: 502 },
@@ -60,7 +61,7 @@ export async function GET(
         return NextResponse.json(
             {
                 error: {
-                    code: "INTERNAL_SERVER_ERROR",
+                    code: "STATS_PROVIDER_ERROR",
                     message: "Failed to load Base wallet stats.",
                 },
             },
