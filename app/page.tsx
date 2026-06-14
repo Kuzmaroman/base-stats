@@ -5,9 +5,12 @@ import type { FormEvent, RefObject } from "react";
 import { useEffect, useRef, useState, useTransition } from "react";
 
 import {
+  getCheckInChainConfig,
   getCheckInContractAddress,
   getDailyCheckInStats,
+  getWalletChainId,
   submitDailyCheckIn,
+  switchToCheckInNetwork,
   type DailyCheckInStats,
 } from "../lib/contracts/checkInContract";
 import type { BaseScoreBreakdown, BaseStats } from "../types/baseStats";
@@ -35,6 +38,7 @@ export default function Home() {
     "Wallet not detected. You can paste an address manually.",
   );
   const [isConnectingWallet, setIsConnectingWallet] = useState(false);
+  const [hasManuallyDisconnected, setHasManuallyDisconnected] = useState(false);
   const [connectedAddress, setConnectedAddress] = useState("");
   const [dailyCheckInStats, setDailyCheckInStats] = useState<DailyCheckInStats | null>(null);
   const [dailyCheckInMessage, setDailyCheckInMessage] = useState(
@@ -43,37 +47,60 @@ export default function Home() {
   const [dailyCheckInError, setDailyCheckInError] = useState("");
   const [isLoadingDailyCheckIn, setIsLoadingDailyCheckIn] = useState(false);
   const [isSubmittingDailyCheckIn, setIsSubmittingDailyCheckIn] = useState(false);
+  const [walletChainId, setWalletChainId] = useState<number | null>(null);
+  const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
 
   const checkInContractAddress = getCheckInContractAddress();
+  const checkInChainConfig = getCheckInChainConfig();
+  const checkInChainName = checkInChainConfig.chainName;
   const checkInReadAddress = connectedAddress || address.trim();
   const hasValidCheckInReadAddress = isValidWalletAddress(checkInReadAddress);
   const canCheckInOnchain = Boolean(connectedAddress && isValidWalletAddress(connectedAddress));
+  const isOnCheckInChain = walletChainId === checkInChainConfig.chainId;
   const isDailyCheckInDisabled =
     !checkInContractAddress ||
     !canCheckInOnchain ||
+    !isOnCheckInChain ||
     isSubmittingDailyCheckIn ||
     Boolean(dailyCheckInStats?.checkedInToday);
 
   useEffect(() => {
     let isMounted = true;
 
-    function initializeWallet() {
+    async function initializeWallet() {
       if (typeof window === "undefined" || !window.ethereum) {
         if (isMounted) {
           setWalletProviderDetected(false);
           setWalletStatusMessage("Wallet not detected. You can paste an address manually.");
+          setWalletChainId(null);
         }
         return;
       }
 
       if (isMounted) {
         setWalletProviderDetected(true);
-        setWalletStatusMessage("Wallet detected. Connect or switch accounts anytime.");
+        setWalletStatusMessage(
+          hasManuallyDisconnected
+            ? "Wallet available. Connect to continue."
+            : "Wallet detected. Connect or switch accounts anytime.",
+        );
+      }
+
+      const currentChainId = await getWalletChainId();
+
+      if (isMounted) {
+        setWalletChainId(currentChainId);
       }
     }
 
     const handleAccountsChanged = (accounts: string[]) => {
       const nextAccount = accounts[0];
+
+      if (hasManuallyDisconnected) {
+        setConnectedAddress("");
+        setWalletStatusMessage("Wallet available. Connect to continue.");
+        return;
+      }
 
       if (nextAccount) {
         setConnectedAddress(nextAccount);
@@ -86,14 +113,20 @@ export default function Home() {
       setWalletStatusMessage("Wallet disconnected. You can paste an address manually.");
     };
 
-    initializeWallet();
+    const handleChainChanged = (chainIdHex: string) => {
+      setWalletChainId(parseInt(chainIdHex, 16));
+    };
+
+    void initializeWallet();
     window.ethereum?.on?.("accountsChanged", handleAccountsChanged);
+    window.ethereum?.on?.("chainChanged", handleChainChanged);
 
     return () => {
       isMounted = false;
       window.ethereum?.removeListener?.("accountsChanged", handleAccountsChanged);
+      window.ethereum?.removeListener?.("chainChanged", handleChainChanged);
     };
-  }, []);
+  }, [hasManuallyDisconnected]);
 
   useEffect(() => {
     let ignore = false;
@@ -109,7 +142,11 @@ export default function Home() {
       if (!checkInReadAddress) {
         setDailyCheckInStats(null);
         setDailyCheckInError("");
-        setDailyCheckInMessage("Paste a wallet address to view daily check-in status.");
+        setDailyCheckInMessage(
+          hasManuallyDisconnected
+            ? "Connect your wallet to check in onchain."
+            : "Paste a wallet address to view daily check-in status.",
+        );
         return;
       }
 
@@ -133,7 +170,9 @@ export default function Home() {
         setDailyCheckInStats(nextStats);
         setDailyCheckInMessage(
           connectedAddress
-            ? "Connected wallet ready for daily check-in."
+            ? isOnCheckInChain
+              ? `Connected wallet ready for daily check-in on ${checkInChainName}.`
+              : `Switch to ${checkInChainName} to check in.`
             : "Connect your wallet to check in onchain.",
         );
       } catch (loadError) {
@@ -159,7 +198,15 @@ export default function Home() {
     return () => {
       ignore = true;
     };
-  }, [checkInContractAddress, checkInReadAddress, connectedAddress, hasValidCheckInReadAddress]);
+  }, [
+    checkInChainName,
+    checkInContractAddress,
+    checkInReadAddress,
+    connectedAddress,
+    hasManuallyDisconnected,
+    hasValidCheckInReadAddress,
+    isOnCheckInChain,
+  ]);
 
   async function fetchStats(walletAddress: string) {
     setIsLoading(true);
@@ -263,10 +310,12 @@ export default function Home() {
         return;
       }
 
+      setHasManuallyDisconnected(false);
       setWalletProviderDetected(true);
       setWalletStatusMessage("Connected wallet detected.");
       setConnectedAddress(connectedAddress);
       setAddress(connectedAddress);
+      setWalletChainId(await getWalletChainId());
       await fetchStats(connectedAddress);
     } catch (connectError) {
       setWalletStatusMessage("Wallet connection was cancelled or unavailable.");
@@ -282,9 +331,41 @@ export default function Home() {
 
   const isBusy = isLoading || isPending || isConnectingWallet;
 
+  async function handleDisconnectWallet() {
+    try {
+      await window.ethereum?.request({
+        method: "wallet_revokePermissions",
+        params: [{ eth_accounts: {} }],
+      });
+    } catch {
+      // App-level disconnect is enough when revokePermissions is unsupported.
+    }
+
+    setHasManuallyDisconnected(true);
+    setConnectedAddress("");
+    setWalletChainId(null);
+    setAddress("");
+    setStats(null);
+    setError("");
+    setCopyState("idle");
+    setWalletStatusMessage(
+      window.ethereum
+        ? "Wallet available. Connect to continue."
+        : "Wallet not detected. You can paste an address manually.",
+    );
+    setDailyCheckInStats(null);
+    setDailyCheckInError("");
+    setDailyCheckInMessage("Connect your wallet to check in onchain.");
+  }
+
   async function handleDailyCheckIn() {
     if (!canCheckInOnchain) {
       setDailyCheckInError("Connect your wallet to check in onchain.");
+      return;
+    }
+
+    if (!isOnCheckInChain) {
+      setDailyCheckInError(`Switch to ${checkInChainName} to check in.`);
       return;
     }
 
@@ -296,7 +377,7 @@ export default function Home() {
       await submitDailyCheckIn();
       const refreshedStats = await getDailyCheckInStats(connectedAddress);
       setDailyCheckInStats(refreshedStats);
-      setDailyCheckInMessage("Daily check-in confirmed on Base.");
+      setDailyCheckInMessage(`Daily check-in confirmed on ${checkInChainName}.`);
     } catch (checkInError) {
       setDailyCheckInError(
         checkInError instanceof Error
@@ -306,6 +387,25 @@ export default function Home() {
       setDailyCheckInMessage("Connect your wallet to check in onchain.");
     } finally {
       setIsSubmittingDailyCheckIn(false);
+    }
+  }
+
+  async function handleSwitchNetwork() {
+    setIsSwitchingNetwork(true);
+    setDailyCheckInError("");
+
+    try {
+      await switchToCheckInNetwork();
+      setWalletChainId(await getWalletChainId());
+      setDailyCheckInMessage(`Switched to ${checkInChainName}.`);
+    } catch (switchError) {
+      setDailyCheckInError(
+        switchError instanceof Error
+          ? switchError.message
+          : `Failed to switch to ${checkInChainName}.`,
+      );
+    } finally {
+      setIsSwitchingNetwork(false);
     }
   }
 
@@ -343,11 +443,15 @@ export default function Home() {
               </label>
               <button
                 type="button"
-                onClick={handleConnectWallet}
+                onClick={connectedAddress ? handleDisconnectWallet : handleConnectWallet}
                 disabled={isBusy}
                 className="inline-flex w-full items-center justify-center rounded-2xl border border-blue-400/30 bg-blue-500/12 px-5 py-3 text-sm font-semibold text-blue-100 transition hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-70 lg:w-auto"
               >
-                {isConnectingWallet ? "Connecting..." : "Connect Wallet"}
+                {connectedAddress
+                  ? "Disconnect Wallet"
+                  : isConnectingWallet
+                    ? "Connecting..."
+                    : "Connect Wallet"}
               </button>
               <button
                 type="submit"
@@ -387,10 +491,15 @@ export default function Home() {
                 for Base Stats.
               </p>
             </div>
-            <div className="rounded-2xl border border-white/8 bg-slate-950/45 px-3 py-2 text-xs text-slate-300">
-              {checkInReadAddress && hasValidCheckInReadAddress
-                ? `Viewing ${shortAddress(checkInReadAddress)}`
-                : "No wallet selected"}
+            <div className="flex flex-col gap-2 sm:items-end">
+              <div className="rounded-2xl border border-white/8 bg-slate-950/45 px-3 py-2 text-xs text-slate-300">
+                {checkInReadAddress && hasValidCheckInReadAddress
+                  ? `Viewing ${shortAddress(checkInReadAddress)}`
+                  : "No wallet selected"}
+              </div>
+              <div className="rounded-2xl border border-blue-400/20 bg-blue-500/10 px-3 py-2 text-xs text-blue-100">
+                Target network: {checkInChainName}
+              </div>
             </div>
           </div>
 
@@ -420,9 +529,9 @@ export default function Home() {
           <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 text-sm text-slate-300">
               <p className="leading-6">{dailyCheckInMessage}</p>
-              {!connectedAddress && address.trim() ? (
-                <p className="mt-1 text-xs text-slate-400">
-                  Connect your wallet to check in onchain.
+              {connectedAddress && !isOnCheckInChain ? (
+                <p className="mt-1 text-xs text-amber-300">
+                  Switch to {checkInChainName} to check in.
                 </p>
               ) : null}
               {process.env.NEXT_PUBLIC_BASE_BUILDER_CODE ? (
@@ -432,14 +541,31 @@ export default function Home() {
               ) : null}
             </div>
 
-            <button
-              type="button"
-              onClick={handleDailyCheckIn}
-              disabled={isDailyCheckInDisabled}
-              className="inline-flex w-full items-center justify-center rounded-2xl bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
-            >
-              {isSubmittingDailyCheckIn ? "Checking in..." : "Check in"}
-            </button>
+            <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
+              {connectedAddress && !isOnCheckInChain ? (
+                <button
+                  type="button"
+                  onClick={handleSwitchNetwork}
+                  disabled={isSwitchingNetwork}
+                  className="inline-flex w-full items-center justify-center rounded-2xl border border-blue-400/30 bg-blue-500/12 px-5 py-3 text-sm font-semibold text-blue-100 transition hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+                >
+                  {isSwitchingNetwork ? "Switching..." : "Switch Network"}
+                </button>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={handleDailyCheckIn}
+                disabled={isDailyCheckInDisabled}
+                className="inline-flex w-full items-center justify-center rounded-2xl bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+              >
+                {isSubmittingDailyCheckIn
+                  ? "Checking in..."
+                  : dailyCheckInStats?.checkedInToday
+                    ? "Checked in"
+                    : "Check in"}
+              </button>
+            </div>
           </div>
 
           {dailyCheckInError ? (
