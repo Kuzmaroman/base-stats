@@ -52,13 +52,15 @@ npm run dev -- --webpack
 ```bash
 NEXT_PUBLIC_CHECKIN_CONTRACT_ADDRESS=TBD
 NEXT_PUBLIC_CHECKIN_CHAIN_ID=84532
-NEXT_PUBLIC_BASE_BUILDER_CODE=TBD
+NEXT_PUBLIC_BASE_BUILDER_CODE=bc_bh8kp8yz
 ```
 
 Daily Check-in is optional and onchain. If the check-in contract address is not configured yet,
 the app keeps working and shows the Daily Check-in section in a disabled configuration-needed state.
 For local or testnet check-in, use Base Sepolia chain id `84532`. Production/mainnet check-in
 should use Base Mainnet chain id `8453` and a Base mainnet contract address.
+If `NEXT_PUBLIC_BASE_BUILDER_CODE` is present, the Daily Check-in write transaction appends
+the ERC-8021 attribution suffix for Base Builder Code tracking.
 
 ## Checks
 

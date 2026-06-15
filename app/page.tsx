@@ -9,6 +9,7 @@ import {
   getCheckInContractAddress,
   getDailyCheckInStats,
   getWalletChainId,
+  hasBuilderAttributionEnabled,
   submitDailyCheckIn,
   switchToCheckInNetwork,
   type DailyCheckInStats,
@@ -64,6 +65,7 @@ export default function Home() {
   const checkInContractAddress = getCheckInContractAddress();
   const checkInChainConfig = getCheckInChainConfig();
   const checkInChainName = checkInChainConfig.chainName;
+  const hasBuilderAttribution = hasBuilderAttributionEnabled();
   const checkInReadAddress = connectedAddress || address.trim();
   const hasValidCheckInReadAddress = isValidWalletAddress(checkInReadAddress);
   const canCheckInOnchain = Boolean(connectedAddress && isValidWalletAddress(connectedAddress));
@@ -587,6 +589,11 @@ export default function Home() {
               {process.env.NEXT_PUBLIC_BASE_BUILDER_CODE ? (
                 <p className="mt-1 text-xs text-slate-500">
                   Builder Code attribution path is prepared for future Base Dashboard setup.
+                </p>
+              ) : null}
+              {hasBuilderAttribution ? (
+                <p className="mt-1 text-xs text-blue-200">
+                  Builder attribution enabled
                 </p>
               ) : null}
             </div>

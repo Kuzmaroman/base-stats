@@ -1,3 +1,4 @@
+import { Attribution } from "ox/erc8021";
 import {
   createPublicClient,
   createWalletClient,
@@ -6,7 +7,6 @@ import {
   getAddress,
   http,
   isAddress,
-  isHex,
   type Address,
   type Chain,
   type Hex,
@@ -33,6 +33,10 @@ export interface DailyCheckInStats {
   currentStreak: number;
   longestStreak: number;
   checkedInToday: boolean;
+}
+
+export function hasBuilderAttributionEnabled(): boolean {
+  return getBuilderCode().length > 0;
 }
 
 export function getCheckInChainConfig(): CheckInChainConfig {
@@ -128,15 +132,19 @@ export async function submitDailyCheckIn(): Promise<{ hash: Hex }> {
     abi: baseStatsCheckInAbi,
     functionName: "checkIn",
   });
+  const finalCalldata = appendBuilderCodeSuffix(functionData);
 
-  // Daily Check-in is the first optional onchain action for Base Stats.
-  // TODO: Replace this suffix handling with the final Base Dashboard Builder Code / ERC-8021
-  // attribution format once the app is registered and the final builder code is issued.
+  logCheckInDebug({
+    builderCodePresent: hasBuilderAttributionEnabled(),
+    dataSuffixLength: finalCalldata.length - functionData.length,
+    finalCalldataLength: finalCalldata.length,
+  });
+
   const hash = await walletClient.sendTransaction({
     account,
     chain: chainConfig.chain,
     to: contractAddress,
-    data: appendBuilderCodeSuffix(functionData),
+    data: finalCalldata,
   });
 
   await publicClient.waitForTransactionReceipt({ hash });
@@ -190,13 +198,26 @@ export async function switchToCheckInNetwork(): Promise<void> {
 }
 
 function appendBuilderCodeSuffix(functionData: Hex): Hex {
-  const builderCode = process.env.NEXT_PUBLIC_BASE_BUILDER_CODE?.trim();
+  const builderCode = getBuilderCode();
 
-  if (!builderCode || !isHex(builderCode)) {
+  if (!builderCode) {
     return functionData;
   }
 
-  return `${functionData}${builderCode.slice(2)}` as Hex;
+  try {
+    const dataSuffix = Attribution.toDataSuffix({
+      codes: [builderCode],
+    });
+
+    return `${functionData}${dataSuffix.slice(2)}` as Hex;
+  } catch (error) {
+    logCheckInConfigIssue(
+      `Failed to build ERC-8021 attribution suffix. Falling back to plain check-in transaction. ${
+        error instanceof Error ? error.message : ""
+      }`.trim(),
+    );
+    return functionData;
+  }
 }
 
 function getRequiredContractAddress(): Address {
@@ -219,6 +240,10 @@ function getPublicClient() {
   });
 }
 
+function getBuilderCode(): string {
+  return process.env.NEXT_PUBLIC_BASE_BUILDER_CODE?.trim() ?? "";
+}
+
 function isMissingChainError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
@@ -228,7 +253,17 @@ function isMissingChainError(error: unknown): boolean {
 }
 
 function logCheckInConfigIssue(message: string): void {
-    if (process.env.NODE_ENV !== "production") {
-        console.warn(`[Base Stats][Check-In] ${message}`);
-    }
+  if (process.env.NODE_ENV !== "production") {
+    console.warn(`[Base Stats][Check-In] ${message}`);
+  }
+}
+
+function logCheckInDebug(details: {
+  builderCodePresent: boolean;
+  dataSuffixLength: number;
+  finalCalldataLength: number;
+}): void {
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[Base Stats][Check-In] transaction attribution", details);
+  }
 }
