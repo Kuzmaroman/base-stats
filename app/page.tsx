@@ -22,6 +22,16 @@ type ApiError = {
   };
 };
 
+const LOADING_MESSAGES = [
+  "Scanning Base activity...",
+  "Reading wallet history...",
+  "Indexing transactions...",
+  "Calculating active days...",
+  "Checking contract interactions...",
+  "Building Base Score...",
+  "Preparing your stats card...",
+] as const;
+
 export default function Home() {
   const shareCardRef = useRef<HTMLDivElement | null>(null);
   const exportShareCardRef = useRef<HTMLDivElement | null>(null);
@@ -49,6 +59,7 @@ export default function Home() {
   const [isSubmittingDailyCheckIn, setIsSubmittingDailyCheckIn] = useState(false);
   const [walletChainId, setWalletChainId] = useState<number | null>(null);
   const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
+  const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
 
   const checkInContractAddress = getCheckInContractAddress();
   const checkInChainConfig = getCheckInChainConfig();
@@ -208,11 +219,26 @@ export default function Home() {
     isOnCheckInChain,
   ]);
 
+  useEffect(() => {
+    if (!isLoading || stats) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setLoadingMessageIndex((current) => (current + 1) % LOADING_MESSAGES.length);
+    }, 1200);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [isLoading, stats]);
+
   async function fetchStats(walletAddress: string) {
     if (isLoading) {
       return;
     }
 
+    setLoadingMessageIndex(0);
     setIsLoading(true);
     setError("");
     setCopyState("idle");
@@ -766,7 +792,11 @@ export default function Home() {
           </div>
         ) : (
           <section className="rounded-[28px] border border-dashed border-white/10 bg-white/3 p-5 text-center text-sm text-slate-400 sm:p-8">
-            {isBusy ? <LoadingState /> : "Enter a wallet address to load Base activity stats."}
+            {isBusy ? (
+              <LoadingState activeIndex={loadingMessageIndex} />
+            ) : (
+              "Enter a wallet address to load Base activity stats."
+            )}
           </section>
         )}
 
@@ -1019,12 +1049,70 @@ function ShareStatTile({
   );
 }
 
-function LoadingState() {
+function LoadingState({ activeIndex }: { activeIndex: number }) {
+  const currentMessage = LOADING_MESSAGES[activeIndex] ?? LOADING_MESSAGES[0];
+
   return (
-    <div className="space-y-3">
-      <div className="mx-auto h-4 w-40 animate-pulse rounded-full bg-white/8" />
-      <div className="mx-auto h-16 w-full max-w-sm animate-pulse rounded-3xl bg-white/6" />
-      <div className="mx-auto h-16 w-full max-w-sm animate-pulse rounded-3xl bg-white/6" />
+    <div className="mx-auto w-full max-w-2xl rounded-[28px] border border-blue-400/20 bg-[linear-gradient(135deg,rgba(0,82,255,0.14),rgba(7,16,31,0.92))] p-5 text-left shadow-[0_20px_60px_rgba(0,82,255,0.12)] sm:p-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-medium text-blue-100">Calculating Base Stats</p>
+          <p className="mt-2 text-sm leading-6 text-slate-200">
+            {currentMessage}
+            <span className="ml-1 inline-flex gap-1 align-middle">
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-blue-300 [animation-delay:-0.3s]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-blue-300 [animation-delay:-0.15s]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-blue-300" />
+            </span>
+          </p>
+        </div>
+        <div className="rounded-full border border-blue-400/20 bg-blue-500/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-blue-100">
+          Loading
+        </div>
+      </div>
+
+      <div className="mt-5 h-2 w-full overflow-hidden rounded-full bg-white/8">
+        <div className="h-full w-1/2 animate-pulse rounded-full bg-[linear-gradient(90deg,#60a5fa_0%,#38bdf8_100%)]" />
+      </div>
+
+      <div className="mt-5 grid gap-3 sm:grid-cols-2">
+        {LOADING_MESSAGES.map((message, index) => {
+          const isActive = index === activeIndex;
+          const isCompleted = index < activeIndex;
+
+          return (
+            <div
+              key={message}
+              className={`rounded-2xl border px-4 py-3 transition ${
+                isActive
+                  ? "border-blue-400/30 bg-blue-500/10 text-blue-50"
+                  : isCompleted
+                    ? "border-emerald-400/20 bg-emerald-400/8 text-slate-200"
+                    : "border-white/8 bg-slate-950/40 text-slate-400"
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <span
+                  className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold ${
+                    isActive
+                      ? "bg-blue-400/20 text-blue-100"
+                      : isCompleted
+                        ? "bg-emerald-400/20 text-emerald-200"
+                        : "bg-white/8 text-slate-500"
+                  }`}
+                >
+                  {isCompleted ? "✓" : index + 1}
+                </span>
+                <span className="text-sm">{message}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="mt-5 text-xs leading-6 text-slate-400">
+        First scan can take a little longer. Results are cached after loading.
+      </p>
     </div>
   );
 }
