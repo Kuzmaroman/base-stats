@@ -40,8 +40,10 @@ export async function GET(
             durationMs: Date.now() - startedAt,
             cacheSource: result.cacheSource,
             method: result.method,
+            attempts: result.attempts,
             pagesFetched: result.pagesFetched,
             transactionsProcessed: result.transactionsProcessed,
+            fallbackReason: result.fallbackReason,
         });
 
         return NextResponse.json(result.stats, { status: 200 });
@@ -51,7 +53,7 @@ export async function GET(
                 {
                     error: {
                         code: "STATS_PROVIDER_ERROR",
-                        message: "Failed to load Base wallet stats.",
+                        message: "Failed to load Base wallet stats. Please try again.",
                     },
                 },
                 { status: 502 },
@@ -62,7 +64,7 @@ export async function GET(
             {
                 error: {
                     code: "STATS_PROVIDER_ERROR",
-                    message: "Failed to load Base wallet stats.",
+                    message: "Failed to load Base wallet stats. Please try again.",
                 },
             },
             { status: 500 },

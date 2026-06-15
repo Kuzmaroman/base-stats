@@ -66,7 +66,15 @@ export interface BaseScoreResult {
 
 export interface BaseWalletActivityResult {
     activity: BaseWalletActivity;
-    method: "txlist" | "v2-fallback" | "cdp";
+    method:
+        | "txlist"
+        | "v2-fallback"
+        | "counters-only"
+        | "partial"
+        | "empty-wallet"
+        | "cdp";
+    attempts: number;
+    fallbackReason?: string;
     pagesFetched: number;
     transactionsProcessed: number;
 }
@@ -76,7 +84,16 @@ export type BaseStatsCacheSource = "memory" | "file" | "fresh";
 export interface BaseStatsResult {
     stats: BaseStats;
     cacheSource: BaseStatsCacheSource;
-    method: "txlist" | "v2-fallback" | "cdp" | "cache";
+    method:
+        | "txlist"
+        | "v2-fallback"
+        | "counters-only"
+        | "partial"
+        | "empty-wallet"
+        | "cdp"
+        | "cache";
+    attempts: number;
+    fallbackReason?: string;
     pagesFetched: number;
     transactionsProcessed: number;
 }

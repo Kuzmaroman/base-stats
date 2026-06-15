@@ -6,6 +6,7 @@ import {
     type BlockscoutTransactionItem,
     type BlockscoutTransactionsResponse,
     type BlockscoutTxListItem,
+    type BlockscoutTxListResponse,
 } from "./blockscoutClient";
 import {
     countUniqueDays,
@@ -18,8 +19,8 @@ import type {
 } from "../../types/baseStats";
 
 const TRANSACTION_CACHE_TTL_MS = 30 * 60 * 1000;
-const DEFAULT_FALLBACK_V2_MAX_PAGES = 10;
-const HARD_FALLBACK_V2_MAX_PAGES_CAP = 50;
+const DEFAULT_FALLBACK_V2_MAX_PAGES = 5;
+const HARD_FALLBACK_V2_MAX_PAGES_CAP = 10;
 
 type CachedWalletActivity = {
     activity: BaseWalletActivity;
@@ -32,10 +33,6 @@ export class BlockscoutAnalyticsProvider implements BaseAnalyticsProvider {
     constructor(private readonly client: BlockscoutClient = new BlockscoutClient()) {}
 
     async getWalletActivity(address: string): Promise<BaseWalletActivityResult> {
-        // Blockscout is the primary free provider for Base Stats V1.
-        // Use the faster Etherscan-compatible txlist endpoint first for production safety.
-        // Keep v2 pagination as a capped fallback while preserving local/dev debugging options.
-        // Swap volume is intentionally excluded from V1 and can be added later with a decoded swaps provider.
         const normalizedAddress = normalizeAddress(address);
         const cached = walletActivityCache.get(normalizedAddress);
 
@@ -43,71 +40,137 @@ export class BlockscoutAnalyticsProvider implements BaseAnalyticsProvider {
             return {
                 activity: cached.activity,
                 method: "txlist",
+                attempts: 0,
                 pagesFetched: 0,
                 transactionsProcessed: 0,
             };
         }
 
         const startedAt = Date.now();
-        const counters = await this.client.getAddressCounters(normalizedAddress);
+        const [countersResult, txListResult] = await Promise.allSettled([
+            this.client.getAddressCounters(normalizedAddress),
+            this.client.getAddressTxList(normalizedAddress, "blockscout-txlist"),
+        ]);
 
-        try {
-            const txListResponse = await this.client.getAddressTxList(
-                normalizedAddress,
-                "blockscout-txlist",
+        const counters = getSettledValue(countersResult);
+        const txListResponse = getSettledValue(txListResult);
+        const txListItems = unwrapTxListResultSafe(txListResponse);
+
+        if (txListItems.ok) {
+            const successfulTransactions = txListItems.value.filter(isSuccessfulTxListTransaction);
+            const transactionCount = txListItems.value.length === 0
+                ? 0
+                : counters
+                    ? toNumber(counters.transactions_count)
+                    : successfulTransactions.length;
+            const activity = buildWalletActivityFromTxList(
+                transactionCount,
+                txListItems.value,
             );
-            const txListItems = unwrapTxListResult(txListResponse);
-            const activity = buildWalletActivityFromTxList(counters, txListItems);
+            const method = successfulTransactions.length === 0 ? "empty-wallet" : "txlist";
+            const attempts = getMaxAttempts(countersResult, txListResult);
 
-            walletActivityCache.set(normalizedAddress, {
-                activity,
-                expiresAt: Date.now() + TRANSACTION_CACHE_TTL_MS,
-            });
-
-            const durationMs = Date.now() - startedAt;
-            console.log("[Base Stats][Blockscout] stats calculated", {
+            setActivityCache(normalizedAddress, activity);
+            logProviderResult({
                 address: normalizedAddress,
-                method: "txlist",
-                durationMs,
-                transactionsProcessed: txListItems.length,
+                method,
+                attempts,
+                durationMs: Date.now() - startedAt,
+                transactionsProcessed: txListItems.value.length,
             });
 
             return {
                 activity,
-                method: "txlist",
+                method,
+                attempts,
                 pagesFetched: 1,
-                transactionsProcessed: txListItems.length,
-            };
-        } catch (error) {
-            if (!(error instanceof BlockscoutApiError)) {
-                throw error;
-            }
-
-            const fallbackStartedAt = Date.now();
-            const transactionFetchResult = await this.fetchTransactionsFallback(normalizedAddress);
-            const activity = buildWalletActivityFromV2(counters, transactionFetchResult.transactions);
-
-            walletActivityCache.set(normalizedAddress, {
-                activity,
-                expiresAt: Date.now() + TRANSACTION_CACHE_TTL_MS,
-            });
-
-            const durationMs = Date.now() - fallbackStartedAt;
-            console.log("[Base Stats][Blockscout] stats calculated", {
-                address: normalizedAddress,
-                method: "v2-fallback",
-                pagesFetched: transactionFetchResult.pagesFetched,
-                durationMs,
-                transactionsProcessed: transactionFetchResult.transactions.length,
-            });
-
-            return {
-                activity,
-                method: "v2-fallback",
-                pagesFetched: transactionFetchResult.pagesFetched,
-                transactionsProcessed: transactionFetchResult.transactions.length,
+                transactionsProcessed: txListItems.value.length,
             };
         }
+
+        let fallbackReason = txListItems.error.message;
+
+        try {
+            const fallbackStartedAt = Date.now();
+            const fallbackResult = await this.fetchTransactionsFallback(normalizedAddress);
+            const transactionCount = counters
+                ? toNumber(counters.transactions_count)
+                : fallbackResult.successfulTransactions.length;
+            const activity = buildWalletActivityFromV2(
+                transactionCount,
+                fallbackResult.transactions,
+            );
+            const method = fallbackResult.successfulTransactions.length === 0
+                ? "empty-wallet"
+                : "v2-fallback";
+            const attempts = Math.max(
+                getSettledAttempts(countersResult),
+                getSettledAttempts(txListResult),
+            );
+
+            setActivityCache(normalizedAddress, activity);
+            logProviderResult({
+                address: normalizedAddress,
+                method,
+                attempts,
+                durationMs: Date.now() - fallbackStartedAt,
+                transactionsProcessed: fallbackResult.transactions.length,
+                pagesFetched: fallbackResult.pagesFetched,
+                fallbackReason,
+            });
+
+            return {
+                activity,
+                method,
+                attempts,
+                fallbackReason,
+                pagesFetched: fallbackResult.pagesFetched,
+                transactionsProcessed: fallbackResult.transactions.length,
+            };
+        } catch (fallbackError) {
+            fallbackReason = [
+                fallbackReason,
+                fallbackError instanceof Error ? fallbackError.message : "Unknown v2 fallback error.",
+            ].join(" | ");
+        }
+
+        if (counters) {
+            const transactionCount = toNumber(counters.transactions_count);
+            const activity = buildPartialWalletActivity(transactionCount);
+            const method = transactionCount === 0 ? "empty-wallet" : "partial";
+            const attempts = Math.max(
+                getSettledAttempts(countersResult),
+                getSettledAttempts(txListResult),
+            );
+
+            setActivityCache(normalizedAddress, activity);
+            logProviderResult({
+                address: normalizedAddress,
+                method,
+                attempts,
+                durationMs: Date.now() - startedAt,
+                transactionsProcessed: 0,
+                fallbackReason,
+            });
+
+            return {
+                activity,
+                method,
+                attempts,
+                fallbackReason,
+                pagesFetched: 0,
+                transactionsProcessed: 0,
+            };
+        }
+
+        throw new BlockscoutApiError(
+            "Failed to load Base wallet stats. Please try again.",
+            undefined,
+            false,
+            getSettledAttempts(txListResult),
+            "blockscout-stats-provider",
+            fallbackReason,
+        );
     }
 
     async getCounters(address: string): Promise<BlockscoutCountersResponse> {
@@ -122,8 +185,33 @@ export class BlockscoutAnalyticsProvider implements BaseAnalyticsProvider {
         );
     }
 
+    async getTxListDebug(address: string): Promise<{
+        status: string;
+        message: string;
+        resultType: string;
+        resultLength: number | null;
+        firstTransactions: BlockscoutTxListItem[];
+        providerDurationMs: number;
+    }> {
+        const debugResponse = await this.client.getAddressTxListDebug(
+            normalizeAddress(address),
+            "blockscout-txlist-debug",
+        );
+        const { result } = debugResponse;
+
+        return {
+            status: typeof result.status === "string" ? result.status : "",
+            message: typeof result.message === "string" ? result.message : "",
+            resultType: Array.isArray(result.result) ? "array" : typeof result.result,
+            resultLength: Array.isArray(result.result) ? result.result.length : null,
+            firstTransactions: Array.isArray(result.result) ? result.result.slice(0, 3) : [],
+            providerDurationMs: debugResponse.providerDurationMs,
+        };
+    }
+
     private async fetchTransactionsFallback(address: string): Promise<{
         transactions: BlockscoutTransactionItem[];
+        successfulTransactions: BlockscoutTransactionItem[];
         pagesFetched: number;
     }> {
         const transactions: BlockscoutTransactionItem[] = [];
@@ -157,13 +245,14 @@ export class BlockscoutAnalyticsProvider implements BaseAnalyticsProvider {
 
         return {
             transactions,
+            successfulTransactions: transactions.filter(isSuccessfulV2Transaction),
             pagesFetched,
         };
     }
 }
 
 function buildWalletActivityFromTxList(
-    counters: BlockscoutCountersResponse,
+    transactionCount: number,
     transactions: BlockscoutTxListItem[],
 ): BaseWalletActivity {
     const successfulTransactions = transactions.filter(isSuccessfulTxListTransaction);
@@ -173,7 +262,7 @@ function buildWalletActivityFromTxList(
     const sortedTimestamps = [...timestamps].sort();
 
     return {
-        transactionCount: toNumber(counters.transactions_count),
+        transactionCount,
         contractInteractions: countUniqueContractInteractionsFromTxList(successfulTransactions),
         contractsCreated: countUniqueCreatedContractsFromTxList(successfulTransactions),
         activeDays: countUniqueDays(timestamps),
@@ -185,7 +274,7 @@ function buildWalletActivityFromTxList(
 }
 
 function buildWalletActivityFromV2(
-    counters: BlockscoutCountersResponse,
+    transactionCount: number,
     transactions: BlockscoutTransactionItem[],
 ): BaseWalletActivity {
     const successfulTransactions = transactions.filter(isSuccessfulV2Transaction);
@@ -195,7 +284,7 @@ function buildWalletActivityFromV2(
     const sortedTimestamps = [...timestamps].sort();
 
     return {
-        transactionCount: toNumber(counters.transactions_count),
+        transactionCount,
         contractInteractions: countUniqueContractInteractionsFromV2(successfulTransactions),
         contractsCreated: countUniqueCreatedContractsFromV2(successfulTransactions),
         activeDays: countUniqueDays(timestamps),
@@ -206,32 +295,62 @@ function buildWalletActivityFromV2(
     };
 }
 
-function unwrapTxListResult(response: {
-    status?: string;
-    result?: BlockscoutTxListItem[] | string | null;
-}): BlockscoutTxListItem[] {
+function buildPartialWalletActivity(transactionCount: number): BaseWalletActivity {
+    return {
+        transactionCount,
+        contractInteractions: 0,
+        contractsCreated: 0,
+        activeDays: 0,
+        activeWeeks: 0,
+        activeMonths: 0,
+        startOfUse: "",
+        lastUse: "",
+    };
+}
+
+function unwrapTxListResultSafe(
+    response: BlockscoutTxListResponse | null,
+): { ok: true; value: BlockscoutTxListItem[] } | { ok: false; error: BlockscoutApiError } {
+    if (!response) {
+        return {
+            ok: false,
+            error: new BlockscoutApiError("Blockscout txlist returned no response."),
+        };
+    }
+
     if (Array.isArray(response.result)) {
-        return response.result;
-    }
-
-    if (typeof response.result === "string") {
-        const normalized = response.result.toLowerCase();
-
-        if (normalized.includes("no transactions")) {
-            return [];
+        if (response.status === "0" && response.message && response.message !== "No transactions found") {
+            return {
+                ok: false,
+                error: new BlockscoutApiError(
+                    `Blockscout txlist provider error: ${response.message}`,
+                ),
+            };
         }
+
+        return {
+            ok: true,
+            value: response.result,
+        };
     }
 
-    if (response.status === "0" && response.result == null) {
-        return [];
+    if (response.status === "0" && response.message === "No transactions found") {
+        return {
+            ok: true,
+            value: [],
+        };
     }
 
-    throw new BlockscoutApiError("Blockscout txlist returned an unexpected response shape.");
+    return {
+        ok: false,
+        error: new BlockscoutApiError(
+            `Blockscout txlist returned an unexpected response shape: ${typeof response.result}`,
+        ),
+    };
 }
 
 function isSuccessfulTxListTransaction(transaction: BlockscoutTxListItem): boolean {
-    const hasReceiptFailure = transaction.txreceipt_status === "0";
-    return transaction.isError !== "1" && !hasReceiptFailure;
+    return transaction.isError !== "1" && transaction.txreceipt_status !== "0";
 }
 
 function isSuccessfulV2Transaction(transaction: BlockscoutTransactionItem): boolean {
@@ -250,7 +369,7 @@ function countUniqueContractInteractionsFromTxList(
         const toAddress = normalizeOptionalAddress(transaction.to);
         const input = typeof transaction.input === "string" ? transaction.input : "";
 
-        if (!toAddress || input.length === 0 || input === "0x") {
+        if (!toAddress || !input || input === "0x") {
             continue;
         }
 
@@ -329,6 +448,25 @@ function extractCreatedContractAddress(
     return null;
 }
 
+function setActivityCache(address: string, activity: BaseWalletActivity): void {
+    walletActivityCache.set(address, {
+        activity,
+        expiresAt: Date.now() + TRANSACTION_CACHE_TTL_MS,
+    });
+}
+
+function logProviderResult(details: {
+    address: string;
+    method: BaseWalletActivityResult["method"];
+    attempts: number;
+    durationMs: number;
+    transactionsProcessed: number;
+    pagesFetched?: number;
+    fallbackReason?: string;
+}): void {
+    console.log("[Base Stats][Blockscout] stats calculated", details);
+}
+
 function toIsoTimestampFromUnixSeconds(value?: string | null): string {
     if (!value) {
         return "";
@@ -387,4 +525,20 @@ function getFallbackV2MaxPages(): number {
     }
 
     return Math.min(Math.floor(parsed), HARD_FALLBACK_V2_MAX_PAGES_CAP);
+}
+
+function getSettledValue<T>(result: PromiseSettledResult<T>): T | null {
+    return result.status === "fulfilled" ? result.value : null;
+}
+
+function getSettledAttempts<T>(result: PromiseSettledResult<T>): number {
+    if (result.status === "rejected" && result.reason instanceof BlockscoutApiError) {
+        return result.reason.attempts;
+    }
+
+    return 1;
+}
+
+function getMaxAttempts(...results: PromiseSettledResult<unknown>[]): number {
+    return Math.max(...results.map(getSettledAttempts));
 }

@@ -12,13 +12,21 @@ import type {
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const CACHE_DIR = path.join(process.cwd(), ".cache", "base-stats");
 const ENABLE_FILE_CACHE = process.env.NODE_ENV !== "production";
-const CACHE_VERSION = "v3";
+const CACHE_VERSION = "v6";
 
 type CachedStatsEntry = {
     version: string;
     cachedAt: string;
     stats: BaseStats;
-    method: "txlist" | "v2-fallback" | "cdp";
+    method:
+        | "txlist"
+        | "v2-fallback"
+        | "counters-only"
+        | "partial"
+        | "empty-wallet"
+        | "cdp";
+    attempts: number;
+    fallbackReason?: string;
     pagesFetched: number;
     transactionsProcessed: number;
 };
@@ -28,6 +36,7 @@ type MemoryCacheEntry = CachedStatsEntry & {
 };
 
 const statsMemoryCache = new Map<string, MemoryCacheEntry>();
+const inFlightStatsRequests = new Map<string, Promise<BaseStatsResult>>();
 
 export class BaseStatsService {
     constructor(private readonly provider: BaseAnalyticsProvider) {}
@@ -55,6 +64,27 @@ export class BaseStatsService {
 
         console.log("[Base Stats][Cache] miss", { address: normalizedAddress });
 
+        const inFlightRequest = inFlightStatsRequests.get(normalizedAddress);
+
+        if (inFlightRequest) {
+            console.log("[Base Stats][Cache] hit", {
+                address: normalizedAddress,
+                source: "in-flight",
+            });
+            return inFlightRequest;
+        }
+
+        const statsPromise = this.loadFreshStats(normalizedAddress);
+        inFlightStatsRequests.set(normalizedAddress, statsPromise);
+
+        try {
+            return await statsPromise;
+        } finally {
+            inFlightStatsRequests.delete(normalizedAddress);
+        }
+    }
+
+    private async loadFreshStats(normalizedAddress: string): Promise<BaseStatsResult> {
         const walletActivityResult = await this.provider.getWalletActivity(normalizedAddress);
         const walletActivity = walletActivityResult.activity;
         const baseStatsInput = {
@@ -79,6 +109,8 @@ export class BaseStatsService {
             cachedAt: new Date().toISOString(),
             stats,
             method: walletActivityResult.method,
+            attempts: walletActivityResult.attempts,
+            fallbackReason: walletActivityResult.fallbackReason,
             pagesFetched: walletActivityResult.pagesFetched,
             transactionsProcessed: walletActivityResult.transactionsProcessed,
         };
@@ -106,6 +138,8 @@ function toStatsResult(
         stats: entry.stats,
         cacheSource,
         method: cacheSource === "fresh" ? entry.method : "cache",
+        attempts: entry.attempts,
+        fallbackReason: entry.fallbackReason,
         pagesFetched: entry.pagesFetched,
         transactionsProcessed: entry.transactionsProcessed,
     };

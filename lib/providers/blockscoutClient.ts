@@ -1,5 +1,8 @@
 const BLOCKSCOUT_API_BASE_URL = "https://base.blockscout.com/api/v2";
 const BLOCKSCOUT_COMPAT_API_URL = "https://base.blockscout.com/api";
+const REQUEST_TIMEOUT_MS = 12_000;
+const RETRY_DELAYS_MS = [500, 1500];
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 
 export interface BlockscoutCountersResponse {
     transactions_count?: string;
@@ -58,10 +61,24 @@ export interface BlockscoutTxListResponse {
     result?: BlockscoutTxListItem[] | string | null;
 }
 
+export interface BlockscoutRequestMeta {
+    attempts: number;
+    durationMs: number;
+}
+
+export interface BlockscoutDebugTxListResponse {
+    providerDurationMs: number;
+    result: BlockscoutTxListResponse;
+}
+
 export class BlockscoutApiError extends Error {
     constructor(
         message: string,
         public readonly status?: number,
+        public readonly retryable = false,
+        public readonly attempts = 1,
+        public readonly queryName?: string,
+        public readonly responseBody?: string,
     ) {
         super(message);
         this.name = "BlockscoutApiError";
@@ -73,8 +90,7 @@ export class BlockscoutClient {
 
     async getAddressCounters(address: string): Promise<BlockscoutCountersResponse> {
         return this.fetchJson<BlockscoutCountersResponse>(
-            `/addresses/${address}/counters`,
-            undefined,
+            buildV2Url(`/addresses/${address}/counters`, undefined),
             "blockscout-address-counters",
         );
     }
@@ -85,8 +101,7 @@ export class BlockscoutClient {
         queryName = "blockscout-address-transactions",
     ): Promise<BlockscoutTransactionsResponse> {
         return this.fetchJson<BlockscoutTransactionsResponse>(
-            `/addresses/${address}/transactions`,
-            query,
+            buildV2Url(`/addresses/${address}/transactions`, query),
             queryName,
         );
     }
@@ -95,8 +110,8 @@ export class BlockscoutClient {
         address: string,
         queryName = "blockscout-address-txlist",
     ): Promise<BlockscoutTxListResponse> {
-        return this.fetchCompatJson<BlockscoutTxListResponse>(
-            {
+        return this.fetchJson<BlockscoutTxListResponse>(
+            buildCompatUrl({
                 module: "account",
                 action: "txlist",
                 address,
@@ -105,58 +120,135 @@ export class BlockscoutClient {
                 sort: "asc",
                 page: 1,
                 offset: 10000,
-            },
+            }),
             queryName,
         );
     }
 
-    private async fetchJson<T>(
-        path: string,
-        query: Record<string, string | number | boolean | null | undefined> | undefined,
-        queryName: string,
-    ): Promise<T> {
-        const url = new URL(`${BLOCKSCOUT_API_BASE_URL}${path}`);
+    async getAddressTxListDebug(
+        address: string,
+        queryName = "blockscout-address-txlist-debug",
+    ): Promise<BlockscoutDebugTxListResponse> {
+        const startedAt = Date.now();
+        const result = await this.getAddressTxList(address, queryName);
 
-        if (query) {
-            for (const [key, value] of Object.entries(query)) {
-                if (value === null || value === undefined) {
-                    continue;
+        return {
+            providerDurationMs: Date.now() - startedAt,
+            result,
+        };
+    }
+
+    private async fetchJson<T>(url: URL, queryName: string): Promise<T> {
+        let lastError: BlockscoutApiError | null = null;
+
+        for (let attemptIndex = 0; attemptIndex <= RETRY_DELAYS_MS.length; attemptIndex += 1) {
+            const attempt = attemptIndex + 1;
+
+            try {
+                return await this.fetchJsonOnce<T>(url, queryName, attempt);
+            } catch (error) {
+                const blockscoutError = toBlockscoutApiError(error, queryName, attempt);
+                lastError = blockscoutError;
+
+                if (!blockscoutError.retryable || attemptIndex === RETRY_DELAYS_MS.length) {
+                    throw blockscoutError;
                 }
 
-                url.searchParams.set(key, String(value));
+                await wait(RETRY_DELAYS_MS[attemptIndex]);
             }
         }
 
-        const response = await this.fetcher(url.toString(), {
-            method: "GET",
-            cache: "no-store",
-        });
-
-        if (!response.ok) {
-            const responseBodyText = await response.text();
-
-            console.error("[Base Stats][Blockscout] API error", {
-                queryName,
-                status: response.status,
-                statusText: response.statusText,
-                body: responseBodyText,
-            });
-
-            throw new BlockscoutApiError(
-                `Blockscout API request failed (${response.status}): ${truncate(responseBodyText)}`,
-                response.status,
-            );
-        }
-
-        return (await response.json()) as T;
+        throw lastError ?? new BlockscoutApiError("Unknown Blockscout error.", undefined, false, 1, queryName);
     }
 
-    private async fetchCompatJson<T>(
-        query: Record<string, string | number | boolean | null | undefined>,
+    private async fetchJsonOnce<T>(
+        url: URL,
         queryName: string,
+        attempt: number,
     ): Promise<T> {
-        const url = new URL(BLOCKSCOUT_COMPAT_API_URL);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
+        try {
+            const response = await this.fetcher(url.toString(), {
+                method: "GET",
+                cache: "no-store",
+                signal: controller.signal,
+            });
+            const responseText = await response.text();
+
+            if (!response.ok) {
+                console.error("[Base Stats][Blockscout] API error", {
+                    queryName,
+                    attempt,
+                    status: response.status,
+                    statusText: response.statusText,
+                    body: responseText,
+                });
+
+                throw new BlockscoutApiError(
+                    `Blockscout API request failed (${response.status}): ${truncate(responseText)}`,
+                    response.status,
+                    RETRYABLE_STATUSES.has(response.status),
+                    attempt,
+                    queryName,
+                    responseText,
+                );
+            }
+
+            try {
+                return JSON.parse(responseText) as T;
+            } catch {
+                console.error("[Base Stats][Blockscout] Invalid JSON response", {
+                    queryName,
+                    attempt,
+                    body: responseText,
+                });
+
+                throw new BlockscoutApiError(
+                    "Blockscout returned invalid JSON.",
+                    response.status,
+                    true,
+                    attempt,
+                    queryName,
+                    responseText,
+                );
+            }
+        } catch (error) {
+            if (error instanceof BlockscoutApiError) {
+                throw error;
+            }
+
+            if (isAbortError(error)) {
+                throw new BlockscoutApiError(
+                    "Blockscout request timed out.",
+                    undefined,
+                    true,
+                    attempt,
+                    queryName,
+                );
+            }
+
+            throw new BlockscoutApiError(
+                error instanceof Error ? error.message : "Blockscout network error.",
+                undefined,
+                true,
+                attempt,
+                queryName,
+            );
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+}
+
+function buildV2Url(
+    path: string,
+    query: Record<string, string | number | boolean | null | undefined> | undefined,
+): URL {
+    const url = new URL(`${BLOCKSCOUT_API_BASE_URL}${path}`);
+
+    if (query) {
         for (const [key, value] of Object.entries(query)) {
             if (value === null || value === undefined) {
                 continue;
@@ -164,30 +256,47 @@ export class BlockscoutClient {
 
             url.searchParams.set(key, String(value));
         }
+    }
 
-        const response = await this.fetcher(url.toString(), {
-            method: "GET",
-            cache: "no-store",
-        });
+    return url;
+}
 
-        if (!response.ok) {
-            const responseBodyText = await response.text();
+function buildCompatUrl(
+    query: Record<string, string | number | boolean | null | undefined>,
+): URL {
+    const url = new URL(BLOCKSCOUT_COMPAT_API_URL);
 
-            console.error("[Base Stats][Blockscout] API error", {
-                queryName,
-                status: response.status,
-                statusText: response.statusText,
-                body: responseBodyText,
-            });
-
-            throw new BlockscoutApiError(
-                `Blockscout API request failed (${response.status}): ${truncate(responseBodyText)}`,
-                response.status,
-            );
+    for (const [key, value] of Object.entries(query)) {
+        if (value === null || value === undefined) {
+            continue;
         }
 
-        return (await response.json()) as T;
+        url.searchParams.set(key, String(value));
     }
+
+    return url;
+}
+
+function toBlockscoutApiError(
+    error: unknown,
+    queryName: string,
+    attempts: number,
+): BlockscoutApiError {
+    if (error instanceof BlockscoutApiError) {
+        return error;
+    }
+
+    return new BlockscoutApiError(
+        error instanceof Error ? error.message : "Unknown Blockscout error.",
+        undefined,
+        true,
+        attempts,
+        queryName,
+    );
+}
+
+function isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === "AbortError";
 }
 
 function truncate(value: string, maxLength = 300): string {
@@ -195,4 +304,8 @@ function truncate(value: string, maxLength = 300): string {
     return normalized.length <= maxLength
         ? normalized
         : `${normalized.slice(0, maxLength)}...`;
+}
+
+function wait(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -209,6 +209,10 @@ export default function Home() {
   ]);
 
   async function fetchStats(walletAddress: string) {
+    if (isLoading) {
+      return;
+    }
+
     setIsLoading(true);
     setError("");
     setCopyState("idle");
@@ -285,10 +289,21 @@ export default function Home() {
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isLoading) {
+      return;
+    }
     if (!isValidWalletAddress(address)) {
       setError("Enter a valid Base wallet address.");
       return;
     }
+    void fetchStats(address);
+  }
+
+  function handleRetryStats() {
+    if (!address.trim() || isLoading) {
+      return;
+    }
+
     void fetchStats(address);
   }
 
@@ -477,8 +492,16 @@ export default function Home() {
           </form>
 
           {error ? (
-            <div className="mt-4 rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">
-              {error}
+            <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100 sm:flex-row sm:items-center sm:justify-between">
+              <span>{error}</span>
+              <button
+                type="button"
+                onClick={handleRetryStats}
+                disabled={isLoading || !address.trim()}
+                className="inline-flex w-full items-center justify-center rounded-xl border border-red-300/30 bg-red-400/10 px-4 py-2 text-sm font-medium text-red-50 transition hover:bg-red-400/20 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+              >
+                Retry
+              </button>
             </div>
           ) : null}
         </section>
