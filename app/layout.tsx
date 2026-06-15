@@ -16,6 +16,9 @@ export const metadata: Metadata = {
   title: "Base Stats",
   description:
     "Unofficial Base wallet activity checker with Base Score and shareable stats cards.",
+  other: {
+    "base:app_id": "6a30378ec2ce3b3db57ed293",
+  },
   openGraph: {
     title: "Base Stats",
     description:
