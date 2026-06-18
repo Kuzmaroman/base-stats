@@ -33,6 +33,8 @@ const LOADING_MESSAGES = [
   "Preparing your stats card...",
 ] as const;
 
+const STATS_RETRY_DELAYS_MS = [1200, 2500] as const;
+
 export default function Home() {
   const shareCardRef = useRef<HTMLDivElement | null>(null);
   const exportShareCardRef = useRef<HTMLDivElement | null>(null);
@@ -61,6 +63,9 @@ export default function Home() {
   const [walletChainId, setWalletChainId] = useState<number | null>(null);
   const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
+  const [statsRetryAttempt, setStatsRetryAttempt] = useState(0);
+  const [shareFeedbackMessage, setShareFeedbackMessage] = useState("");
+  const [isMobileLike] = useState(() => detectMobileLike());
 
   const checkInContractAddress = getCheckInContractAddress();
   const checkInChainConfig = getCheckInChainConfig();
@@ -76,6 +81,7 @@ export default function Home() {
     !isOnCheckInChain ||
     isSubmittingDailyCheckIn ||
     Boolean(dailyCheckInStats?.checkedInToday);
+  const shareButtonLabel = isMobileLike ? "Share / Save PNG" : "Download PNG";
 
   useEffect(() => {
     let isMounted = true;
@@ -242,37 +248,64 @@ export default function Home() {
 
     setLoadingMessageIndex(0);
     setIsLoading(true);
+    setStatsRetryAttempt(0);
     setError("");
     setCopyState("idle");
 
     try {
-      const response = await fetch(`/api/stats/${walletAddress.trim()}`, {
-        method: "GET",
-        cache: "no-store",
-      });
-      const responseText = await response.text();
-      const payload = parseStatsResponse(responseText);
+      for (let attempt = 0; attempt <= STATS_RETRY_DELAYS_MS.length; attempt += 1) {
+        try {
+          const response = await fetch(`/api/stats/${walletAddress.trim()}`, {
+            method: "GET",
+            cache: "no-store",
+          });
+          const responseText = await response.text();
+          const payload = parseStatsResponse(responseText);
 
-      if (!response.ok) {
-        throw new Error(
-          "error" in payload && payload.error?.message
-            ? payload.error.message
-            : "Failed to load stats. Please try again.",
-        );
+          if (!response.ok) {
+            const errorMessage =
+              "error" in payload && payload.error?.message
+                ? payload.error.message
+                : "Failed to load stats. Please try again.";
+            const errorCode =
+              "error" in payload && payload.error?.code ? payload.error.code : "";
+
+            if (shouldAutoRetryStats(errorCode, errorMessage) && attempt < STATS_RETRY_DELAYS_MS.length) {
+              setStatsRetryAttempt(attempt + 1);
+              await wait(STATS_RETRY_DELAYS_MS[attempt]);
+              continue;
+            }
+
+            throw new Error(errorMessage);
+          }
+
+          startTransition(() => {
+            setStats(payload as BaseStats);
+          });
+          return;
+        } catch (requestError) {
+          if (
+            attempt < STATS_RETRY_DELAYS_MS.length &&
+            shouldAutoRetryStats("", requestError instanceof Error ? requestError.message : "")
+          ) {
+            setStatsRetryAttempt(attempt + 1);
+            await wait(STATS_RETRY_DELAYS_MS[attempt]);
+            continue;
+          }
+
+          throw requestError;
+        }
       }
-
-      startTransition(() => {
-        setStats(payload as BaseStats);
-      });
     } catch (fetchError) {
       setStats(null);
       setError(
         fetchError instanceof Error
-          ? fetchError.message
+          ? normalizeStatsErrorMessage(fetchError.message)
           : "Failed to load stats. Please try again.",
       );
     } finally {
       setIsLoading(false);
+      setStatsRetryAttempt(0);
     }
   }
 
@@ -297,6 +330,7 @@ export default function Home() {
     }
 
     setIsDownloadingImage(true);
+    setShareFeedbackMessage("");
 
     try {
       const dataUrl = await toPng(exportShareCardRef.current, {
@@ -306,10 +340,39 @@ export default function Home() {
         canvasHeight: 675,
         backgroundColor: "#030712",
       });
+      const filename = `base-stats-${toShareFileSlug(stats.address)}.png`;
+
+      if (isMobileLike) {
+        const file = await dataUrlToFile(dataUrl, filename);
+
+        if (
+          typeof navigator !== "undefined" &&
+          "share" in navigator &&
+          "canShare" in navigator &&
+          navigator.canShare?.({ files: [file] })
+        ) {
+          await navigator.share({
+            files: [file],
+            title: "Base Stats",
+            text: "My Base Stats",
+          });
+          return;
+        }
+
+        const opened = openImageInNewTab(dataUrl);
+
+        if (opened) {
+          setShareFeedbackMessage("Image opened. Long press to save it on mobile.");
+          return;
+        }
+      }
+
       const link = document.createElement("a");
       link.href = dataUrl;
-      link.download = `base-stats-${toShareFileSlug(stats.address)}.png`;
+      link.download = filename;
       link.click();
+    } catch {
+      setShareFeedbackMessage("Could not generate the image. Please try again.");
     } finally {
       setIsDownloadingImage(false);
     }
@@ -766,7 +829,7 @@ export default function Home() {
                       disabled={isDownloadingImage}
                       className="inline-flex w-full items-center justify-center rounded-2xl bg-blue-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-70 sm:w-auto"
                     >
-                      {isDownloadingImage ? "Generating image..." : "Download image"}
+                      {isDownloadingImage ? "Generating image..." : shareButtonLabel}
                     </button>
                     <button
                       type="button"
@@ -777,9 +840,12 @@ export default function Home() {
                         ? "Copied"
                         : copyState === "error"
                           ? "Copy failed"
-                          : "Copy share text"}
+                        : "Copy share text"}
                     </button>
                   </div>
+                  {shareFeedbackMessage ? (
+                    <p className="text-xs text-slate-400">{shareFeedbackMessage}</p>
+                  ) : null}
                 </div>
               </div>
 
@@ -800,7 +866,7 @@ export default function Home() {
         ) : (
           <section className="rounded-[28px] border border-dashed border-white/10 bg-white/3 p-5 text-center text-sm text-slate-400 sm:p-8">
             {isBusy ? (
-              <LoadingState activeIndex={loadingMessageIndex} />
+              <LoadingState activeIndex={loadingMessageIndex} retryAttempt={statsRetryAttempt} />
             ) : (
               "Enter a wallet address to load Base activity stats."
             )}
@@ -1056,7 +1122,13 @@ function ShareStatTile({
   );
 }
 
-function LoadingState({ activeIndex }: { activeIndex: number }) {
+function LoadingState({
+  activeIndex,
+  retryAttempt,
+}: {
+  activeIndex: number;
+  retryAttempt: number;
+}) {
   const currentMessage = LOADING_MESSAGES[activeIndex] ?? LOADING_MESSAGES[0];
 
   return (
@@ -1072,9 +1144,16 @@ function LoadingState({ activeIndex }: { activeIndex: number }) {
               <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-blue-300" />
             </span>
           </p>
+          {retryAttempt > 0 ? (
+            <div className="mt-3 space-y-1 text-xs leading-5 text-slate-300">
+              <p>Still checking Base activity...</p>
+              <p>Blockscout is taking a little longer than usual.</p>
+              <p>First scan can take longer. Retrying automatically...</p>
+            </div>
+          ) : null}
         </div>
         <div className="rounded-full border border-blue-400/20 bg-blue-500/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-blue-100">
-          Loading
+          {retryAttempt > 0 ? `Retry ${retryAttempt}` : "Loading"}
         </div>
       </div>
 
@@ -1138,6 +1217,59 @@ function parseStatsResponse(responseText: string): BaseStats | ApiError {
   } catch {
     throw new Error("Failed to load stats. Please try again.");
   }
+}
+
+function shouldAutoRetryStats(errorCode: string, errorMessage: string): boolean {
+  const normalizedCode = errorCode.toUpperCase();
+  const normalizedMessage = errorMessage.toLowerCase();
+
+  return (
+    normalizedCode === "STATS_PROVIDER_ERROR" ||
+    normalizedMessage.includes("failed to load base wallet stats") ||
+    normalizedMessage.includes("failed to load stats") ||
+    normalizedMessage.includes("network") ||
+    normalizedMessage.includes("fetch")
+  );
+}
+
+function normalizeStatsErrorMessage(message: string): string {
+  return message.trim().length > 0
+    ? message
+    : "Failed to load Base wallet stats. Please try again.";
+}
+
+async function dataUrlToFile(dataUrl: string, filename: string): Promise<File> {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  return new File([blob], filename, { type: "image/png" });
+}
+
+function openImageInNewTab(dataUrl: string): boolean {
+  const openedWindow = window.open();
+
+  if (!openedWindow) {
+    return false;
+  }
+
+  openedWindow.document.write(
+    `<!doctype html><html><head><title>Base Stats PNG</title><meta name="viewport" content="width=device-width, initial-scale=1" /></head><body style="margin:0;background:#02050c;display:flex;align-items:center;justify-content:center;min-height:100vh;"><img src="${dataUrl}" alt="Base Stats PNG" style="max-width:100%;height:auto;display:block;" /></body></html>`,
+  );
+  openedWindow.document.close();
+  return true;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function detectMobileLike(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
+  const mobileAgent = /Android|iPhone|iPad|iPod/i.test(window.navigator.userAgent);
+  return coarsePointer || mobileAgent;
 }
 
 function formatDate(value: string): string {
