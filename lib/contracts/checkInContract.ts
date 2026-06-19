@@ -109,9 +109,14 @@ export async function getDailyCheckInStats(userAddress: string): Promise<DailyCh
 }
 
 export async function submitDailyCheckIn(): Promise<{ hash: Hex }> {
+  const { hash } = await submitDailyCheckInTransaction();
+  await waitForDailyCheckInReceipt(hash);
+  return { hash };
+}
+
+export async function submitDailyCheckInTransaction(): Promise<{ hash: Hex }> {
   const contractAddress = getRequiredContractAddress();
   const chainConfig = getCheckInChainConfig();
-  const publicClient = getPublicClient();
 
   if (typeof window === "undefined" || !window.ethereum) {
     throw new Error("Connect your wallet to check in onchain.");
@@ -147,9 +152,12 @@ export async function submitDailyCheckIn(): Promise<{ hash: Hex }> {
     data: finalCalldata,
   });
 
-  await publicClient.waitForTransactionReceipt({ hash });
-
   return { hash };
+}
+
+export async function waitForDailyCheckInReceipt(hash: Hex): Promise<void> {
+  const publicClient = getPublicClient();
+  await publicClient.waitForTransactionReceipt({ hash });
 }
 
 export async function getWalletChainId(): Promise<number | null> {

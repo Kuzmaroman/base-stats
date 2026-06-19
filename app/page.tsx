@@ -2,7 +2,7 @@
 
 import { toPng } from "html-to-image";
 import type { FormEvent, RefObject } from "react";
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
 import {
   getCheckInChainConfig,
@@ -10,8 +10,9 @@ import {
   getDailyCheckInStats,
   getWalletChainId,
   hasBuilderAttributionEnabled,
-  submitDailyCheckIn,
+  submitDailyCheckInTransaction,
   switchToCheckInNetwork,
+  waitForDailyCheckInReceipt,
   type DailyCheckInStats,
 } from "../lib/contracts/checkInContract";
 import type { BaseScoreBreakdown, BaseStats } from "../types/baseStats";
@@ -22,6 +23,14 @@ type ApiError = {
     message?: string;
   };
 };
+
+type CheckInTransactionState =
+  | "idle"
+  | "awaitingWalletConfirmation"
+  | "transactionSubmitted"
+  | "confirmingOnchain"
+  | "success"
+  | "error";
 
 const LOADING_MESSAGES = [
   "Scanning Base activity...",
@@ -38,6 +47,7 @@ const STATS_RETRY_DELAYS_MS = [1200, 2500] as const;
 export default function Home() {
   const shareCardRef = useRef<HTMLDivElement | null>(null);
   const exportShareCardRef = useRef<HTMLDivElement | null>(null);
+  const latestCheckInTransactionStateRef = useRef<CheckInTransactionState>("idle");
   const [address, setAddress] = useState("");
   const [stats, setStats] = useState<BaseStats | null>(null);
   const [error, setError] = useState<string>("");
@@ -59,7 +69,9 @@ export default function Home() {
   );
   const [dailyCheckInError, setDailyCheckInError] = useState("");
   const [isLoadingDailyCheckIn, setIsLoadingDailyCheckIn] = useState(false);
-  const [isSubmittingDailyCheckIn, setIsSubmittingDailyCheckIn] = useState(false);
+  const [checkInTransactionState, setCheckInTransactionState] =
+    useState<CheckInTransactionState>("idle");
+  const [pendingCheckInHash, setPendingCheckInHash] = useState("");
   const [walletChainId, setWalletChainId] = useState<number | null>(null);
   const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
@@ -75,13 +87,79 @@ export default function Home() {
   const hasValidCheckInReadAddress = isValidWalletAddress(checkInReadAddress);
   const canCheckInOnchain = Boolean(connectedAddress && isValidWalletAddress(connectedAddress));
   const isOnCheckInChain = walletChainId === checkInChainConfig.chainId;
+  const isDailyCheckInPending =
+    checkInTransactionState === "awaitingWalletConfirmation" ||
+    checkInTransactionState === "transactionSubmitted" ||
+    checkInTransactionState === "confirmingOnchain";
   const isDailyCheckInDisabled =
     !checkInContractAddress ||
     !canCheckInOnchain ||
     !isOnCheckInChain ||
-    isSubmittingDailyCheckIn ||
+    isDailyCheckInPending ||
+    isLoadingDailyCheckIn ||
     Boolean(dailyCheckInStats?.checkedInToday);
+  const shouldRefreshDailyCheckInOnReturn =
+    Boolean(connectedAddress) &&
+    (isDailyCheckInPending || checkInTransactionState === "success" || pendingCheckInHash.length > 0);
   const shareButtonLabel = isMobileLike ? "Share / Save PNG" : "Download PNG";
+
+  const resolveDailyCheckInIdleMessage = useCallback(() => {
+    if (connectedAddress) {
+      return isOnCheckInChain
+        ? `Connected wallet ready for daily check-in on ${checkInChainName}.`
+        : `Switch to ${checkInChainName} to check in.`;
+    }
+
+    return "Connect your wallet to check in onchain.";
+  }, [checkInChainName, connectedAddress, isOnCheckInChain]);
+
+  const refreshDailyCheckInStatus = useCallback(
+    async (
+      targetAddress: string,
+      options?: {
+        optimisticCheckedIn?: boolean;
+        silent?: boolean;
+      },
+    ) => {
+      if (!isValidWalletAddress(targetAddress)) {
+        return null;
+      }
+
+      if (!options?.silent) {
+        setIsLoadingDailyCheckIn(true);
+      }
+
+      try {
+        const nextStats = await getDailyCheckInStats(targetAddress);
+        setDailyCheckInStats(nextStats);
+        setDailyCheckInError("");
+        return nextStats;
+      } catch (refreshError) {
+        if (!options?.silent) {
+          setDailyCheckInError("Failed to load daily check-in status.");
+        }
+
+        if (process.env.NODE_ENV !== "production") {
+          console.warn("[Base Stats][Check-In] failed to refresh status", refreshError);
+        }
+
+        if (options?.optimisticCheckedIn) {
+          setDailyCheckInStats((current) => markCheckedInToday(current));
+        }
+
+        return null;
+      } finally {
+        if (!options?.silent) {
+          setIsLoadingDailyCheckIn(false);
+        }
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    latestCheckInTransactionStateRef.current = checkInTransactionState;
+  }, [checkInTransactionState]);
 
   useEffect(() => {
     let isMounted = true;
@@ -118,6 +196,8 @@ export default function Home() {
       if (hasManuallyDisconnected) {
         setConnectedAddress("");
         setWalletStatusMessage("Wallet available. Connect to continue.");
+        setCheckInTransactionState("idle");
+        setPendingCheckInHash("");
         return;
       }
 
@@ -125,11 +205,14 @@ export default function Home() {
         setConnectedAddress(nextAccount);
         setAddress(nextAccount);
         setWalletStatusMessage("Connected wallet detected.");
+        setCheckInTransactionState("idle");
         return;
       }
 
       setConnectedAddress("");
       setWalletStatusMessage("Wallet disconnected. You can paste an address manually.");
+      setCheckInTransactionState("idle");
+      setPendingCheckInHash("");
     };
 
     const handleChainChanged = (chainIdHex: string) => {
@@ -161,11 +244,7 @@ export default function Home() {
       if (!checkInReadAddress) {
         setDailyCheckInStats(null);
         setDailyCheckInError("");
-        setDailyCheckInMessage(
-          hasManuallyDisconnected
-            ? "Connect your wallet to check in onchain."
-            : "Paste a wallet address to view daily check-in status.",
-        );
+        setDailyCheckInMessage("Connect your wallet to check in onchain.");
         return;
       }
 
@@ -187,24 +266,16 @@ export default function Home() {
         }
 
         setDailyCheckInStats(nextStats);
-        setDailyCheckInMessage(
-          connectedAddress
-            ? isOnCheckInChain
-              ? `Connected wallet ready for daily check-in on ${checkInChainName}.`
-              : `Switch to ${checkInChainName} to check in.`
-            : "Connect your wallet to check in onchain.",
-        );
-      } catch (loadError) {
+        if (latestCheckInTransactionStateRef.current !== "success") {
+          setDailyCheckInMessage(resolveDailyCheckInIdleMessage());
+        }
+      } catch {
         if (ignore) {
           return;
         }
 
         setDailyCheckInStats(null);
-        setDailyCheckInError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Failed to load daily check-in status.",
-        );
+        setDailyCheckInError("Failed to load daily check-in status.");
       } finally {
         if (!ignore) {
           setIsLoadingDailyCheckIn(false);
@@ -222,9 +293,9 @@ export default function Home() {
     checkInContractAddress,
     checkInReadAddress,
     connectedAddress,
-    hasManuallyDisconnected,
     hasValidCheckInReadAddress,
     isOnCheckInChain,
+    resolveDailyCheckInIdleMessage,
   ]);
 
   useEffect(() => {
@@ -240,6 +311,33 @@ export default function Home() {
       window.clearInterval(interval);
     };
   }, [isLoading, stats]);
+
+  useEffect(() => {
+    if (!shouldRefreshDailyCheckInOnReturn || !connectedAddress || !hasValidCheckInReadAddress) {
+      return;
+    }
+
+    const refreshFromWalletReturn = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+
+      void refreshDailyCheckInStatus(connectedAddress, { silent: true });
+    };
+
+    window.addEventListener("focus", refreshFromWalletReturn);
+    document.addEventListener("visibilitychange", refreshFromWalletReturn);
+
+    return () => {
+      window.removeEventListener("focus", refreshFromWalletReturn);
+      document.removeEventListener("visibilitychange", refreshFromWalletReturn);
+    };
+  }, [
+    connectedAddress,
+    hasValidCheckInReadAddress,
+    refreshDailyCheckInStatus,
+    shouldRefreshDailyCheckInOnReturn,
+  ]);
 
   async function fetchStats(walletAddress: string) {
     if (isLoading) {
@@ -423,6 +521,9 @@ export default function Home() {
       setConnectedAddress(connectedAddress);
       setAddress(connectedAddress);
       setWalletChainId(await getWalletChainId());
+      setDailyCheckInError("");
+      setCheckInTransactionState("idle");
+      setPendingCheckInHash("");
       await fetchStats(connectedAddress);
     } catch (connectError) {
       setWalletStatusMessage("Wallet connection was cancelled or unavailable.");
@@ -455,6 +556,7 @@ export default function Home() {
     setStats(null);
     setError("");
     setCopyState("idle");
+    setShareFeedbackMessage("");
     setWalletStatusMessage(
       window.ethereum
         ? "Wallet available. Connect to continue."
@@ -463,6 +565,8 @@ export default function Home() {
     setDailyCheckInStats(null);
     setDailyCheckInError("");
     setDailyCheckInMessage("Connect your wallet to check in onchain.");
+    setCheckInTransactionState("idle");
+    setPendingCheckInHash("");
   }
 
   async function handleDailyCheckIn() {
@@ -476,24 +580,67 @@ export default function Home() {
       return;
     }
 
-    setIsSubmittingDailyCheckIn(true);
+    setCheckInTransactionState("awaitingWalletConfirmation");
+    setPendingCheckInHash("");
     setDailyCheckInError("");
-    setDailyCheckInMessage("Waiting for Base transaction confirmation...");
+    setDailyCheckInMessage("Confirm in wallet to submit today's check-in.");
 
     try {
-      await submitDailyCheckIn();
-      const refreshedStats = await getDailyCheckInStats(connectedAddress);
-      setDailyCheckInStats(refreshedStats);
+      const { hash } = await submitDailyCheckInTransaction();
+      setPendingCheckInHash(hash);
+      setCheckInTransactionState("transactionSubmitted");
+      setDailyCheckInMessage(`Transaction submitted. Confirming on ${checkInChainName}...`);
+
+      setCheckInTransactionState("confirmingOnchain");
+      await waitForDailyCheckInReceipt(hash);
+      setDailyCheckInMessage(`Refreshing your daily check-in status on ${checkInChainName}...`);
+
+      let refreshedStats = await refreshDailyCheckInStatus(connectedAddress, {
+        optimisticCheckedIn: true,
+      });
+
+      if (!refreshedStats?.checkedInToday) {
+        setDailyCheckInStats((current) => markCheckedInToday(current));
+
+        await wait(1000);
+        refreshedStats = await refreshDailyCheckInStatus(connectedAddress, {
+          optimisticCheckedIn: true,
+        });
+      }
+
+      if (!refreshedStats?.checkedInToday) {
+        await wait(3000);
+        refreshedStats = await refreshDailyCheckInStatus(connectedAddress, {
+          optimisticCheckedIn: true,
+        });
+      }
+
+      setCheckInTransactionState("success");
       setDailyCheckInMessage(`Daily check-in confirmed on ${checkInChainName}.`);
     } catch (checkInError) {
-      setDailyCheckInError(
-        checkInError instanceof Error
-          ? checkInError.message
-          : "Daily check-in transaction failed.",
+      const normalizedError = normalizeCheckInErrorMessage(checkInError, checkInChainName);
+
+      if (process.env.NODE_ENV !== "production") {
+        console.warn("[Base Stats][Check-In] transaction failed", checkInError);
+      }
+
+      if (normalizedError === "Already checked in today.") {
+        await refreshDailyCheckInStatus(connectedAddress, { optimisticCheckedIn: true });
+      }
+
+      setCheckInTransactionState("error");
+      setDailyCheckInError(normalizedError);
+      setDailyCheckInMessage(
+        normalizedError === "Already checked in today."
+          ? "Daily check-in already completed for today."
+          : resolveDailyCheckInIdleMessage(),
       );
-      setDailyCheckInMessage("Connect your wallet to check in onchain.");
     } finally {
-      setIsSubmittingDailyCheckIn(false);
+      setPendingCheckInHash("");
+
+      setCheckInTransactionState((currentState) =>
+        currentState === "success" ? currentState : "idle",
+      );
     }
   }
 
@@ -679,11 +826,7 @@ export default function Home() {
                 disabled={isDailyCheckInDisabled}
                 className="inline-flex w-full items-center justify-center rounded-2xl bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
               >
-                {isSubmittingDailyCheckIn
-                  ? "Checking in..."
-                  : dailyCheckInStats?.checkedInToday
-                    ? "Checked in"
-                    : "Check in"}
+                {getDailyCheckInButtonLabel(checkInTransactionState, Boolean(dailyCheckInStats?.checkedInToday))}
               </button>
             </div>
           </div>
@@ -1236,6 +1379,88 @@ function normalizeStatsErrorMessage(message: string): string {
   return message.trim().length > 0
     ? message
     : "Failed to load Base wallet stats. Please try again.";
+}
+
+function getDailyCheckInButtonLabel(
+  transactionState: CheckInTransactionState,
+  checkedInToday: boolean,
+): string {
+  if (checkedInToday || transactionState === "success") {
+    return "Checked in today";
+  }
+
+  if (transactionState === "awaitingWalletConfirmation") {
+    return "Confirm in wallet...";
+  }
+
+  if (
+    transactionState === "transactionSubmitted" ||
+    transactionState === "confirmingOnchain"
+  ) {
+    return "Confirming...";
+  }
+
+  return "Check in";
+}
+
+function normalizeCheckInErrorMessage(error: unknown, chainName: string): string {
+  const rawMessage = extractErrorMessage(error).toLowerCase();
+
+  if (
+    rawMessage.includes("user rejected") ||
+    rawMessage.includes("rejected the request") ||
+    rawMessage.includes("4001")
+  ) {
+    return "Transaction was rejected in your wallet.";
+  }
+
+  if (
+    rawMessage.includes("already checked in") ||
+    rawMessage.includes("alreadycheckedintoday")
+  ) {
+    return "Already checked in today.";
+  }
+
+  if (
+    rawMessage.includes("does not match the target chain") ||
+    rawMessage.includes("switch to base") ||
+    rawMessage.includes("wrong network")
+  ) {
+    return `Switch to ${chainName} to check in.`;
+  }
+
+  return "Check-in failed. Please try again.";
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "";
+}
+
+function markCheckedInToday(current: DailyCheckInStats | null): DailyCheckInStats {
+  const currentUtcDay = Math.floor(Date.now() / 86_400_000);
+
+  if (!current) {
+    return {
+      lastCheckInDay: currentUtcDay,
+      currentStreak: 1,
+      longestStreak: 1,
+      checkedInToday: true,
+    };
+  }
+
+  return {
+    ...current,
+    lastCheckInDay: Math.max(current.lastCheckInDay, currentUtcDay),
+    checkedInToday: true,
+  };
 }
 
 async function dataUrlToFile(dataUrl: string, filename: string): Promise<File> {
